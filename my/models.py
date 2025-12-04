@@ -13,7 +13,7 @@ class NeuralNetwork:
             self.layers[-1].is_output_layer = True
         self.save_dir = "save"
 
-    def save_dir(self, save_dir):
+    def set_save_dir(self, save_dir):
         self.save_dir = save_dir
         if not os.path.exists(self.save_dir):
             os.makedirs(self.save_dir)

@@ -124,8 +124,9 @@ def conv_task(epochs, lr, batch_size, net_seed=40):
     x_train = x_train.reshape(-1, 1, 28, 28)  # 从(55000, 28, 28)变为(55000, 1, 28, 28)
     x_test = x_test.reshape(-1, 1, 28, 28)  # 同样处理测试集
     print("数据集初始化完成")
-    net.train(x_train, y_train, epochs, lr, batch_size=batch_size, loss_name='cross_entropy',save_mode=1,save_interval=10,checkpoint_path='epoch_0020_loss_0.539394.npz')
-    # net.load_weights('epoch_0020_loss_0.247937.npz')
+    net.set_save_dir("./result/卷积任务/有dropout")
+    net.train(x_train, y_train, epochs, lr, batch_size=batch_size, loss_name='cross_entropy',save_mode=1,save_interval=10,checkpoint_path='epoch_0100_loss_0.171180.npz')
+    # net.load_weights('epoch_0100_loss_0.171180.npz')
     y_pred_prob = net.predict(x_test)
     y_pred = xp.argmax(y_pred_prob, axis=1)
     if hasattr(y_pred, 'get'):  # 检查是否为CuPy数组
