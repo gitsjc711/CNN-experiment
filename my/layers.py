@@ -1,5 +1,6 @@
 from .device_manager import device_manager
 from abc import ABC, abstractmethod
+import cupy as cp
 
 
 def im2col(input_data, filter_h, filter_w, stride=1, pad=0):
@@ -57,7 +58,7 @@ def col2im(col, input_shape, filter_h, filter_w, stride=1, pad=0):
 class Layer(ABC):
     """所有层的基类，定义统一接口"""
 
-    def save_params(self, filepath, layer_index):
+    def save_params(self, layer_index):
         """
         保存层参数到文件
         参数:
@@ -65,7 +66,21 @@ class Layer(ABC):
             layer_index: 层在网络中的索引
         """
         # 默认实现：无参数层不需要保存
-        pass
+        params_dict = {}
+        # 检查该层是否有可训练参数
+        if hasattr(self, 'W') and hasattr(self, 'b'):
+            if self.W is not None and self.b is not None:
+                # 保存层类型标识
+                params_dict[f'layer{layer_index}_type'] = self.__class__.__name__
+
+                # 转换GPU数组到CPU numpy数组
+                if hasattr(self.W, 'device'):  # CuPy数组
+                    params_dict[f'layer{layer_index}_W'] = cp.asnumpy(self.W)
+                    params_dict[f'layer{layer_index}_b'] = cp.asnumpy(self.b)
+                else:  # NumPy数组
+                    params_dict[f'layer{layer_index}_W'] = self.W
+                    params_dict[f'layer{layer_index}_b'] = self.b
+        return params_dict
 
     def load_params(self, data, layer_index):
         """
@@ -74,8 +89,38 @@ class Layer(ABC):
             data: 加载的数据字典
             layer_index: 层索引
         """
-        # 默认实现：无参数层不需要加载
-        pass
+        has_weights = (hasattr(self, 'W') and hasattr(self, 'b') and
+                       self.W is not None and self.b is not None)
+
+        if not has_weights:
+            # 无参数层，静默返回成功
+            return True
+        weight_key = f'layer{layer_index}_W'
+        bias_key = f'layer{layer_index}_b'
+
+        if weight_key in data and bias_key in data:
+            saved_weight_shape = data[weight_key].shape
+            saved_bias_shape = data[bias_key].shape
+            current_weight_shape = self.W.shape
+            current_bias_shape = self.b.shape
+            if saved_weight_shape != current_weight_shape:
+                print(f"错误：第{layer_index}层权重形状不匹配")
+                print(f"  保存的权重形状: {saved_weight_shape}")
+                print(f"  当前的权重形状: {current_weight_shape}")
+                return False
+
+                # 偏置形状验证
+            if saved_bias_shape != current_bias_shape:
+                print(f"错误：第{layer_index}层偏置形状不匹配")
+                print(f"  保存的偏置形状: {saved_bias_shape}")
+                print(f"  当前的偏置形状: {current_bias_shape}")
+                return False
+            self.W = device_manager.to_device(data[weight_key])
+            self.b = device_manager.to_device(data[bias_key])
+            return True
+
+        print(f"警告：第{layer_index}层在保存文件中找不到参数")
+        return False
 
     def get_config(self):
         """返回层的配置信息，用于summary和验证"""
@@ -105,70 +150,17 @@ class Layer(ABC):
 
 
 class FullyConnectedLayer(Layer):
-    def __init__(self, input_dim, output_dim, activation='sigmoid'):
+    def __init__(self, input_dim, output_dim):
         xp = device_manager.get_xp()
         # 初始化参数 (Xavier初始化)，你要随机也可以，但效率不高，可以试试
         self.W = xp.random.randn(input_dim, output_dim) * xp.sqrt(2.0 / (input_dim + output_dim))
         self.b = xp.zeros((1, output_dim))
-        self.activation = activation
         self.Y_prev = None  # 前一层激活值（输入）
-        self.Z = None  # 加权和
         self.Y = None  # 激活输出
-        self.is_output_layer = False
 
         # 保存构造参数用于序列化
         self.input_dim = input_dim
         self.output_dim = output_dim
-
-    def save_params(self, filepath, layer_index):
-        """保存全连接层的权重和偏置"""
-        xp = device_manager.get_xp()
-
-        # 准备参数数据
-        params_dict = {}
-
-        # 转换GPU数组到CPU numpy数组
-        if hasattr(self.W, 'device'):  # CuPy数组
-            params_dict[f'layer{layer_index}_W'] = xp.asnumpy(self.W)
-            params_dict[f'layer{layer_index}_b'] = xp.asnumpy(self.b)
-        else:  # NumPy数组
-            params_dict[f'layer{layer_index}_W'] = self.W
-            params_dict[f'layer{layer_index}_b'] = self.b
-
-        # 保存配置信息
-        params_dict[f'layer{layer_index}_activation'] = self.activation
-
-        return params_dict
-
-    def load_params(self, data, layer_index):
-        """加载全连接层的权重和偏置"""
-        xp = device_manager.get_xp()
-
-        # 检查参数是否存在
-        weight_key = f'layer{layer_index}_W'
-        bias_key = f'layer{layer_index}_b'
-
-        if weight_key in data and bias_key in data:
-
-            # 验证参数形状
-            expected_shape = (self.input_dim, self.output_dim)
-            if self.W.shape != expected_shape:
-                print(f"警告：第{layer_index}层权重形状不匹配（期望：{expected_shape}，实际：{self.W.shape}）")
-                return False
-
-            # 检查激活函数一致性
-            activation_key = f'layer{layer_index}_activation'
-            if activation_key in data:
-                saved_activation = data[activation_key].item() if hasattr(data[activation_key], 'item') else data[
-                    activation_key]
-                if saved_activation != self.activation:
-                    print(f"警告：第{layer_index}层激活函数不匹配（当前：{self.activation}，保存的：{saved_activation}）")
-            self.W = device_manager.to_device(data[weight_key])
-            self.b = device_manager.to_device(data[bias_key])
-            return True
-        else:
-            print(f"警告：第{layer_index}层在保存文件中找不到参数")
-            return False
 
     def get_config(self):
         """返回层的详细配置信息"""
@@ -176,7 +168,6 @@ class FullyConnectedLayer(Layer):
         config.update({
             'input_dim': self.input_dim,
             'output_dim': self.output_dim,
-            'activation': self.activation,
             'params_count': self.get_params_count()
         })
         return config
@@ -184,43 +175,15 @@ class FullyConnectedLayer(Layer):
     def forward(self, Y_prev):
         xp = device_manager.get_xp()
         self.Y_prev = Y_prev
-        self.Z = xp.dot(Y_prev, self.W) + self.b
-
-        # 激活函数
-        if self.activation == 'sigmoid':
-            self.Y = 1 / (1 + xp.exp(-self.Z))
-        elif self.activation == 'relu':
-            self.Y = xp.maximum(0, self.Z)
-        elif self.activation == 'softmax':
-            # Softmax激活函数
-            Z_max = xp.max(self.Z, axis=1, keepdims=True)
-            exp_Z = xp.exp(self.Z - Z_max)  # 数值稳定的指数计算
-            sum_exp_Z = xp.sum(exp_Z, axis=1, keepdims=True)
-            self.Y = exp_Z / sum_exp_Z
-        else:
-            self.Y = self.Z  # 线性激活
+        self.Y = xp.dot(Y_prev, self.W) + self.b
 
         return self.Y  # 传给下一层当输入
 
-    def backward(self, delta_curr, learning_rate, loss_name):
+    def backward(self, delta_curr, learning_rate):
         xp = device_manager.get_xp()
         m = self.Y_prev.shape[0]  # 样本数
 
-        # 计算激活函数的导数
-        if self.activation == 'relu':
-            d_activation = (self.Z > 0).astype(int)
-        elif self.activation == 'sigmoid':
-            if self.is_output_layer and loss_name == 'cross_entropy':
-                # 输出层：假设使用交叉熵损失，梯度简化
-                d_activation = 1
-            else:
-                # 隐藏层：需要完整计算sigmoid导数
-                d_activation = self.Y * (1 - self.Y)
-
-        else:
-            d_activation = 1  # 线性激活导数为1
-        # 累计梯度
-        delta = delta_curr * d_activation
+        delta = delta_curr
 
         # 计算权重和偏置的梯度
         dW = xp.dot(self.Y_prev.T, delta) / m  # 平均梯度
@@ -264,57 +227,6 @@ class Conv2DLayer(Layer):
         self.col_W = None  # 权重展开矩阵
         self.conv_output = None  # 卷积输出（ReLU前）
 
-    def save_params(self, filepath, layer_index):
-        """保存卷积层参数"""
-        xp = device_manager.get_xp()
-
-        params_dict = {}
-
-        # 转换参数到CPU
-        if hasattr(self.W, 'device'):
-            params_dict[f'layer{layer_index}_W'] = xp.asnumpy(self.W)
-            params_dict[f'layer{layer_index}_b'] = xp.asnumpy(self.b)
-        else:
-            params_dict[f'layer{layer_index}_W'] = self.W
-            params_dict[f'layer{layer_index}_b'] = self.b
-
-        # 保存配置
-        params_dict[f'layer{layer_index}_type'] = self.__class__.__name__
-        params_dict[f'layer{layer_index}_activation'] = self.activation
-
-        return params_dict
-
-    def load_params(self, data, layer_index):
-        """加载卷积层参数"""
-        xp = device_manager.get_xp()
-
-        weight_key = f'layer{layer_index}_W'
-        bias_key = f'layer{layer_index}_b'
-
-        if weight_key in data and bias_key in data:
-            saved_weight_shape = data[weight_key].shape
-            saved_bias_shape = data[bias_key].shape
-            current_weight_shape = self.W.shape
-            current_bias_shape = self.b.shape
-            if saved_weight_shape != current_weight_shape:
-                print(f"错误：第{layer_index}层权重形状不匹配")
-                print(f"  保存的权重形状: {saved_weight_shape}")
-                print(f"  当前的权重形状: {current_weight_shape}")
-                return False
-
-                # 偏置形状验证
-            if saved_bias_shape != current_bias_shape:
-                print(f"错误：第{layer_index}层偏置形状不匹配")
-                print(f"  保存的偏置形状: {saved_bias_shape}")
-                print(f"  当前的偏置形状: {current_bias_shape}")
-                return False
-            self.W = device_manager.to_device(data[weight_key])
-            self.b = device_manager.to_device(data[bias_key])
-            return True
-
-        print(f"警告：第{layer_index}层在保存文件中找不到参数")
-        return False
-
     def get_config(self):
         config = super().get_config()
         config.update({
@@ -323,7 +235,6 @@ class Conv2DLayer(Layer):
             'kernel_size': self.kernel_size,
             'stride': self.stride,
             'padding': self.padding,
-            'activation': self.activation,
             'params_count': self.get_params_count()
         })
         return config
@@ -352,21 +263,13 @@ class Conv2DLayer(Layer):
         conv_output_reshaped = conv_output_reshaped.transpose(0, 3, 1,
                                                               2)  # shape: (batch_size, out_channels, out_h, out_w)
 
-        # 应用激活函数
-        if self.activation == 'relu':
-            output = xp.maximum(0, conv_output_reshaped)
-        elif self.activation == 'sigmoid':
-            output = 1 / (1 + xp.exp(-conv_output_reshaped))
-        else:
-            output = conv_output_reshaped
-
         # 缓存用于反向传播
         self.x = x
         self.conv_output = conv_output_reshaped  # 保存ReLU前的输出
 
-        return output
+        return conv_output_reshaped
 
-    def backward(self, d_out, learning_rate, loss_name=None):
+    def backward(self, d_out, learning_rate):
         """
         反向传播（使用col2im优化）
         参数:
@@ -378,24 +281,22 @@ class Conv2DLayer(Layer):
         xp = device_manager.get_xp()
         batch_size = d_out.shape[0]
 
-        # 计算ReLU的梯度
-        d_relu = d_out * (self.conv_output > 0).astype(xp.float32)
 
         # 重塑梯度为二维矩阵: (batch_size*out_h*out_w, out_channels)
-        d_relu_2d = d_relu.transpose(0, 2, 3, 1).reshape(-1, self.out_channels)
+        d_2d = d_out.transpose(0, 2, 3, 1).reshape(-1, self.out_channels)
 
         # 计算偏置梯度：对每个输出通道的梯度求和
-        d_bias = xp.sum(d_relu_2d, axis=0) / batch_size
+        d_bias = xp.sum(d_2d, axis=0) / batch_size
 
         # 计算权重梯度：矩阵乘法
-        d_weights_2d = xp.dot(self.col.T, d_relu_2d) / batch_size  # shape: (in_channels*k_h*k_w, out_channels)
+        d_weights_2d = xp.dot(self.col.T, d_2d) / batch_size  # shape: (in_channels*k_h*k_w, out_channels)
 
         # 重塑权重梯度回四维
         k_h, k_w = self.kernel_size
         d_weights = d_weights_2d.T.reshape(self.out_channels, self.in_channels, k_h, k_w)
 
         # 计算输入梯度：传播到前一层的梯度
-        d_col = xp.dot(d_relu_2d, self.col_W.T)  # shape: (batch_size*out_h*out_w, in_channels*k_h*k_w)
+        d_col = xp.dot(d_2d, self.col_W.T)  # shape: (batch_size*out_h*out_w, in_channels*k_h*k_w)
 
         # 使用col2im将梯度还原为输入形状
         d_x = col2im(d_col, self.x.shape, k_h, k_w, self.stride, self.padding)
@@ -475,7 +376,7 @@ class Pool2DLayer(Layer):
 
         return output
 
-    def backward(self, d_out, learning_rate=0.01, loss_name='mse'):
+    def backward(self, d_out, learning_rate=0.01):
         """
         反向传播（使用im2col优化）
         """
@@ -543,7 +444,7 @@ class Flatten(Layer):
         batch_size = x.shape[0]
         return x.reshape(batch_size, -1)
 
-    def backward(self, d_out, learning_rate=None, loss_name=None):
+    def backward(self, d_out, learning_rate=None):
         """
         反向传播
         参数:
@@ -572,6 +473,11 @@ class Dropout(Layer):
         self.mask = None  # 用于记录哪些神经元被保留
         self.training = True  # 训练/预测模式标志
 
+    def get_config(self):
+        config = super().get_config()
+        config['params_count'] = 0
+        return config
+
     def forward(self, x):
         """
         前向传播
@@ -593,7 +499,7 @@ class Dropout(Layer):
 
         return output
 
-    def backward(self, d_out):
+    def backward(self, d_out, learning_rate=None):
         """
         反向传播
         参数:

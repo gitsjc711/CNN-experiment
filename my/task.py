@@ -1,13 +1,13 @@
 from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from my.layers import FullyConnectedLayer, Conv2DLayer, Pool2DLayer,Flatten
+from my.layers import FullyConnectedLayer, Conv2DLayer, Pool2DLayer,Flatten,Dropout
 from my.models import NeuralNetwork
 from my.device_manager import device_manager
 from sklearn.metrics import accuracy_score, classification_report, f1_score
 from my.db import DataPreprocessing
-
-
+from my.activation import ReLU,Softmax
+# 注意我把激活函数拆出来了，需要自己写
 def full_connected_task(epochs, lr, batch_size, net_seed=40, db_seed=20, test_size=0.3):
     device_manager.set_device('gpu')
     xp = device_manager.get_xp()
@@ -49,6 +49,7 @@ def full_connected_task(epochs, lr, batch_size, net_seed=40, db_seed=20, test_si
     print(f"F1 Score: {f1: .4f}")
 
 
+# 注意我把激活函数拆出来了，需要自己写
 def full_connected_task_for_image(epochs, lr, batch_size, net_seed=40, db_seed=20, test_size=0.3):
     device_manager.set_device('gpu')
     xp = device_manager.get_xp()
@@ -99,13 +100,18 @@ def conv_task(epochs, lr, batch_size, net_seed=40):
     xp.random.seed(net_seed)
     # 定义神经网络net
     net = NeuralNetwork([
-        Conv2DLayer(in_channels=1, out_channels=6, kernel_size=5, stride=1, padding=0, activation='relu'),
+        Conv2DLayer(in_channels=1, out_channels=6, kernel_size=5, stride=1, padding=0),
+        ReLU(),
         Pool2DLayer(kernel_size=2, stride=2, mode='max'),
-        Conv2DLayer(in_channels=6, out_channels=16, kernel_size=5, stride=1, padding=0, activation='relu'),
+        Conv2DLayer(in_channels=6, out_channels=16, kernel_size=5, stride=1, padding=0),
+        ReLU(),
         Pool2DLayer(kernel_size=2, stride=2, mode='max'),
-        Conv2DLayer(in_channels=16, out_channels=64, kernel_size=4, stride=1, padding=0, activation='relu'),
+        Conv2DLayer(in_channels=16, out_channels=64, kernel_size=4, stride=1, padding=0),
+        ReLU(),
         Flatten(),
-        FullyConnectedLayer(64, 10, 'softmax')
+        Dropout(),
+        FullyConnectedLayer(64, 10),
+        Softmax()
     ])
     print("构建网络完成")
     net.summary()
@@ -118,7 +124,8 @@ def conv_task(epochs, lr, batch_size, net_seed=40):
     x_train = x_train.reshape(-1, 1, 28, 28)  # 从(55000, 28, 28)变为(55000, 1, 28, 28)
     x_test = x_test.reshape(-1, 1, 28, 28)  # 同样处理测试集
     print("数据集初始化完成")
-    net.train(x_train, y_train, epochs, lr, batch_size=batch_size, loss_name='cross_entropy',save_mode=1,checkpoint_path="./save/epoch_0100_loss_0.071880.npz")
+    net.train(x_train, y_train, epochs, lr, batch_size=batch_size, loss_name='cross_entropy',save_mode=1,save_interval=10,checkpoint_path='epoch_0020_loss_0.539394.npz')
+    # net.load_weights('epoch_0020_loss_0.247937.npz')
     y_pred_prob = net.predict(x_test)
     y_pred = xp.argmax(y_pred_prob, axis=1)
     if hasattr(y_pred, 'get'):  # 检查是否为CuPy数组

@@ -32,7 +32,7 @@ class NeuralNetwork:
 
         # 让每一层保存自己的参数
         for i, layer in enumerate(self.layers):
-            layer_dict = layer.save_params(filepath, i)  # 每层返回自己的参数字典
+            layer_dict = layer.save_params( i)  # 每层返回自己的参数字典
             if layer_dict:  # 只有有参数的层会返回非空字典
                 save_dict.update(layer_dict)
 
@@ -119,10 +119,10 @@ class NeuralNetwork:
             Y = layer.forward(Y)
         return Y
 
-    def backward(self, delta, learning_rate, loss_name):
+    def backward(self, delta, learning_rate):
         # 反向传播要从最后一层开始，所以要reversed（）生成一个反向迭代器
         for layer in reversed(self.layers):
-            delta = layer.backward(delta, learning_rate, loss_name)
+            delta = layer.backward(delta, learning_rate)
 
     def predict(self, X):
         Y = device_manager.to_device(X)
@@ -228,7 +228,7 @@ class NeuralNetwork:
                 # 累加损失（后续计算平均损失）
                 epoch_loss += batch_loss
                 # 反向传播
-                self.backward(delta, lr, loss_name)
+                self.backward(delta, lr)
             # 定期保存和打印（相对于当前起始轮次的间隔）
             avg_epoch_loss = epoch_loss / num_batches
             epoch_pbar.set_postfix(loss=f'{avg_epoch_loss:.4f}')
