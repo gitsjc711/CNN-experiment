@@ -553,3 +553,68 @@ class Flatten(Layer):
         """
         # 核心操作：将梯度重塑回前向传播输入时的形状
         return d_out.reshape(self.original_shape)
+
+
+class Dropout(Layer):
+    """
+    Dropout层实现
+    前向传播：随机失活部分神经元
+    反向传播：只传递被保留神经元的梯度
+    """
+
+    def __init__(self, dropout_rate=0.5):
+        """
+        参数:
+        - dropout_rate: 神经元被丢弃的概率，通常设为0.2-0.5
+        """
+        self.dropout_rate = dropout_rate
+        self.keep_prob = 1 - dropout_rate  # 神经元保留概率
+        self.mask = None  # 用于记录哪些神经元被保留
+        self.training = True  # 训练/预测模式标志
+
+    def forward(self, x):
+        """
+        前向传播
+        参数:
+        - x: 输入数据
+        返回:
+        - 经过Dropout处理后的输出
+        """
+        if not self.training or self.keep_prob == 1:
+            # 预测模式或keep_prob=1时，直接返回输入
+            return x
+        xp = device_manager.get_xp()
+        # 生成随机掩码：相同形状的[0,1)均匀分布随机数
+        self.mask = (xp.random.random(x.shape) < self.keep_prob).astype(xp.float32)
+
+        # 应用掩码并缩放，保持期望值不变
+        output = x * self.mask
+        output /= self.keep_prob  # 重要：缩放以保持期望值
+
+        return output
+
+    def backward(self, d_out):
+        """
+        反向传播
+        参数:
+        - d_out: 上游传来的梯度
+        返回:
+        - 传递给前一层的梯度
+        """
+        if not self.training or self.keep_prob == 1:
+            # 预测模式，梯度直接传递
+            return d_out
+
+        # 只传递被保留神经元的梯度
+        d_x = d_out * self.mask
+        d_x /= self.keep_prob  # 同样需要缩放
+
+        return d_x
+
+    def train(self):
+        """设置为训练模式"""
+        self.training = True
+
+    def eval(self):
+        """设置为预测/评估模式"""
+        self.training = False

@@ -127,6 +127,9 @@ class NeuralNetwork:
     def predict(self, X):
         Y = device_manager.to_device(X)
         for layer in self.layers:
+            if hasattr(layer, 'training'):
+                layer.eval()
+        for layer in self.layers:
             Y = layer.forward(Y)
         return Y
 
@@ -148,6 +151,10 @@ class NeuralNetwork:
         loss_fn = LossFactory.get_loss(loss_name)
         start_epoch = 0  # 初始训练轮次
         initial_loss = None  # 初始损失值
+        # 设置训练模式
+        for layer in self.layers:
+            if hasattr(layer, 'training'):
+                layer.train()
         if save_mode is not None:
             if not os.path.exists(self.save_dir):
                 os.makedirs(self.save_dir)
