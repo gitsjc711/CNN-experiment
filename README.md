@@ -9,6 +9,13 @@
 -  **卷积层** (Conv2DLayer) 
 -  **池化层** (Pool2DLayer)
 -  **展平层** (Flatten)
+-  **丢弃层** (Dropout)
+-  **批量归一化层** (BatchNormalization)
+
+### 激活函数内容
+-  **ReLU** 
+-  **Sigmoid**（如果是2分类的话可能得改）
+-  **Softmax** 
 
 ### 语雀学习资源
 本项目的配套学习文档请参考语雀专栏：  

@@ -527,3 +527,228 @@ class Dropout(Layer):
     def eval(self):
         """设置为预测/评估模式"""
         self.training = False
+
+
+class BatchNormalization(Layer):
+    """
+    批量归一化层
+    使用基类的 W 作为缩放参数 gamma，b 作为偏移参数 beta
+    """
+
+    def __init__(self, num_features, momentum=0.9, epsilon=1e-5):
+        """
+        参数:
+        - num_features: 特征数量（全连接层是神经元数，卷积层是通道数）
+        - momentum: 移动平均的动量参数，用于更新全局统计量
+        - epsilon: 防止除零错误的小常数
+        """
+        super().__init__()
+        self.num_features = num_features
+        self.momentum = momentum
+        self.epsilon = epsilon
+        self.training = True  # 训练/预测模式标志
+
+        # 可训练参数：缩放gamma (W) 和 偏移beta (b)
+        # 初始化：gamma为1，beta为0，这样初始状态相当于恒等变换
+        xp = device_manager.get_xp()
+        self.W = xp.ones(num_features)  # gamma
+        self.b = xp.zeros(num_features)  # beta
+
+        # 非训练参数：移动平均的均值和方差（用于预测模式）
+        self.running_mean = xp.zeros(num_features)
+        self.running_var = xp.ones(num_features)  # 初始为1，避免初始除零
+
+        # 缓存：用于反向传播
+        self.cache = None
+
+    def forward(self, x):
+        """
+        前向传播
+        参数:
+        - x: 输入数据，形状取决于网络层类型：
+            - 全连接层: (batch_size, num_features)
+            - 卷积层: (batch_size, channels, height, width)
+        """
+        xp = device_manager.get_xp()
+
+        if self.training:
+            return self._forward_train(x, xp)
+        else:
+            return self._forward_test(x, xp)
+
+    def _forward_train(self, x, xp):
+        """训练模式前向传播"""
+        # 根据输入维度计算统计量
+        if len(x.shape) == 2:  # 全连接层 [N, D]
+            axis = 0  # 沿批次维度计算
+        elif len(x.shape) == 4:  # 卷积层 [N, C, H, W]
+            # 在通道维度上计算每个通道的均值和方差
+            axis = (0, 2, 3)  # 对批次、高度、宽度求平均
+        else:
+            raise ValueError(f"不支持的输入维度: {len(x.shape)}")
+
+        # 计算当前批次的均值和方差
+        batch_mean = xp.mean(x, axis=axis, keepdims=True)
+        batch_var = xp.var(x, axis=axis, keepdims=True)
+
+        # 更新移动平均（用于预测模式）
+        self.running_mean = (self.momentum * self.running_mean +
+                             (1 - self.momentum) * batch_mean.reshape(-1))
+        self.running_var = (self.momentum * self.running_var +
+                            (1 - self.momentum) * batch_var.reshape(-1))
+
+        # 归一化
+        x_hat = (x - batch_mean) / xp.sqrt(batch_var + self.epsilon)
+
+        # 缩放和平移 (使用 W 作为 gamma, b 作为 beta)
+        # 需要将W和b重塑为适合广播的形状
+        if len(x.shape) == 4:
+            # 卷积层: 重塑为 (1, C, 1, 1) 以支持广播
+            gamma = self.W.reshape(1, -1, 1, 1)
+            beta = self.b.reshape(1, -1, 1, 1)
+        else:
+            # 全连接层: 保持 (1, D) 或 (D,)
+            gamma = self.W.reshape(1, -1)
+            beta = self.b.reshape(1, -1)
+
+        out = gamma * x_hat + beta
+
+        # 缓存中间结果用于反向传播
+        self.cache = {
+            'x': x,
+            'x_hat': x_hat,
+            'batch_mean': batch_mean,
+            'batch_var': batch_var,
+            'gamma': gamma  # 缓存广播后的gamma
+        }
+
+        return out
+
+    def _forward_test(self, x, xp):
+        """预测模式前向传播：使用移动平均的统计量"""
+        # 准备移动统计量的形状以支持广播
+        if len(x.shape) == 4:  # 卷积层
+            running_mean = self.running_mean.reshape(1, -1, 1, 1)
+            running_var = self.running_var.reshape(1, -1, 1, 1)
+            gamma = self.W.reshape(1, -1, 1, 1)
+            beta = self.b.reshape(1, -1, 1, 1)
+        else:  # 全连接层
+            running_mean = self.running_mean.reshape(1, -1)
+            running_var = self.running_var.reshape(1, -1)
+            gamma = self.W.reshape(1, -1)
+            beta = self.b.reshape(1, -1)
+
+        # 使用移动统计量进行归一化
+        x_hat = (x - running_mean) / xp.sqrt(running_var + self.epsilon)
+        out = gamma * x_hat + beta
+
+        return out
+
+    def backward(self, dout, learning_rate):
+        """优化版本的反向传播"""
+        if not self.training:
+            return dout
+
+        xp = device_manager.get_xp()
+        x, x_hat, batch_mean, batch_var, gamma = (self.cache['x'], self.cache['x_hat'],
+                                                  self.cache['batch_mean'], self.cache['batch_var'],
+                                                  self.cache['gamma'])
+
+        N = x.shape[0]
+        if len(x.shape) == 4:
+            N *= x.shape[2] * x.shape[3]
+
+        # 1. 参数梯度
+        dgamma = xp.sum(dout * x_hat, axis=(0, 2, 3) if len(x.shape) == 4 else 0)
+        dbeta = xp.sum(dout, axis=(0, 2, 3) if len(x.shape) == 4 else 0)
+
+        # 2. 简化版输入梯度计算[5](@ref)
+        dx_hat = dout * gamma
+        sqrt_var = xp.sqrt(batch_var + self.epsilon)
+
+        # 重塑统计量以支持广播
+        if len(x.shape) == 4:
+            batch_mean = batch_mean.reshape(1, -1, 1, 1)
+            sqrt_var = sqrt_var.reshape(1, -1, 1, 1)
+        else:
+            batch_mean = batch_mean.reshape(1, -1)
+            sqrt_var = sqrt_var.reshape(1, -1)
+
+        # 更简洁的梯度计算
+        dx = (1.0 / (N * sqrt_var)) * (
+                N * dx_hat -
+                xp.sum(dx_hat, axis=(0, 2, 3) if len(x.shape) == 4 else 0, keepdims=True) -
+                x_hat * xp.sum(dx_hat * x_hat, axis=(0, 2, 3) if len(x.shape) == 4 else 0, keepdims=True)
+        )
+
+        # 更新参数
+        self.W -= learning_rate * dgamma
+        self.b -= learning_rate * dbeta
+
+        return dx
+
+    def save_params(self, layer_index):
+        """
+        扩展保存方法，包含移动平均统计量
+        """
+        params_dict = super().save_params(layer_index)  # 保存W和b (gamma和beta)
+
+        # 添加移动平均统计量
+        xp = device_manager.get_xp()
+        if hasattr(self.running_mean, 'device'):  # CuPy数组
+            params_dict[f'layer{layer_index}_running_mean'] = xp.asnumpy(self.running_mean)
+            params_dict[f'layer{layer_index}_running_var'] = xp.asnumpy(self.running_var)
+        else:
+            params_dict[f'layer{layer_index}_running_mean'] = self.running_mean
+            params_dict[f'layer{layer_index}_running_var'] = self.running_var
+
+        params_dict[f'layer{layer_index}_num_features'] = self.num_features
+        params_dict[f'layer{layer_index}_momentum'] = self.momentum
+        params_dict[f'layer{layer_index}_epsilon'] = self.epsilon
+
+        return params_dict
+
+    def load_params(self, data, layer_index):
+        """
+        扩展加载方法，包含移动平均统计量
+        """
+        # 先加载可训练参数 W 和 b (gamma 和 beta)
+        success = super().load_params(data, layer_index)
+
+        if not success:
+            return False
+
+        # 加载移动平均统计量和其他配置
+        running_mean_key = f'layer{layer_index}_running_mean'
+        running_var_key = f'layer{layer_index}_running_var'
+
+        if running_mean_key in data and running_var_key in data:
+            self.running_mean = device_manager.to_device(data[running_mean_key])
+            self.running_var = device_manager.to_device(data[running_var_key])
+
+        # 加载其他超参数（可选，提供向后兼容性）
+        num_features_key = f'layer{layer_index}_num_features'
+        if num_features_key in data:
+            self.num_features = data[num_features_key]
+
+        return True
+
+    def get_config(self):
+        """返回层的配置信息"""
+        config = super().get_config()
+        config.update({
+            'num_features': self.num_features,
+            'momentum': self.momentum,
+            'epsilon': self.epsilon,
+            'has_running_stats': True,
+            'params_count': self.get_params_count()
+        })
+        return config
+
+    def train(self):
+        """设置为训练模式"""
+        self.training = True
+
+    def eval(self):
+        """设置为评估/预测模式"""
+        self.training = False
