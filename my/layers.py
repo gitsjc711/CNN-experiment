@@ -308,9 +308,21 @@ class Conv2DLayer(Layer):
         return d_x
 
 
-class Pool2DLayer(Layer):
-    def __init__(self, kernel_size, stride=None, padding=0, mode='max'):
-        # ... 初始化部分与您的代码完全相同，保持不变 ...
+class MaxPool2D(Layer):
+    """
+    最大池化层 - 使用im2col/col2im优化
+    前向传播：取每个池化窗口内的最大值
+    反向传播：梯度只传递到前向传播中的最大值位置
+    """
+
+    def __init__(self, kernel_size, stride=None, padding=0):
+        """
+        参数:
+        - kernel_size: 池化窗口大小，整数或元组 (k_h, k_w)
+        - stride: 步长，默认为kernel_size
+        - padding: 填充大小
+        """
+        super().__init__()
         if stride is None:
             self.stride = kernel_size
         else:
@@ -319,23 +331,106 @@ class Pool2DLayer(Layer):
             kernel_size = (kernel_size, kernel_size)
         self.kernel_size = kernel_size
         self.padding = padding
-        self.mode = mode
         self.cache = {}  # 用于缓存中间结果，如最大值位置
-
-    def get_config(self):
-        config = super().get_config()
-        config.update({
-            'kernel_size': self.kernel_size,
-            'stride': self.stride,
-            'padding': self.padding,
-            'mode': self.mode,
-            'params_count': 0  # 池化层无参数
-        })
-        return config
 
     def forward(self, x):
         """
-        前向传播（使用im2col优化）
+        前向传播 - 最大池化
+        """
+        xp = device_manager.get_xp()
+        batch_size, channels, h, w = x.shape
+        k_h, k_w = self.kernel_size
+
+        # 1. 计算输出尺寸
+        out_h = (h + 2 * self.padding - k_h) // self.stride + 1
+        out_w = (w + 2 * self.padding - k_w) // self.stride + 1
+
+        k_h, k_w = self.kernel_size
+        # 2. 使用im2col将输入数据展开为二维矩阵
+        # col的形状为 (batch_size * out_h * out_w, channels * k_h * k_w)
+        col = im2col(x, k_h, k_w, self.stride, self.padding)
+
+        # 3. 重塑col，使每个池化窗口在一个独立的行中
+        # 重塑后形状: (batch_size * out_h * out_w * channels, k_h * k_w)
+        col_reshaped = col.reshape(-1, k_h * k_w)
+        max_indices = xp.argmax(col_reshaped, axis=1)
+        output = col_reshaped[xp.arange(len(max_indices)), max_indices]
+        output = output.reshape(batch_size, out_h, out_w, channels).transpose(0, 3, 1, 2)
+
+        # 6. 缓存反向传播所需信息
+        self.cache = {
+            'x_shape': x.shape,
+            'col_shape': col.shape,
+            'max_indices': max_indices,
+        }
+
+        return output
+
+    def backward(self, d_out, learning_rate=None, loss_name=None):
+        """
+        反向传播 - 最大池化
+        只将梯度传递到前向传播中最大值所在的位置
+        """
+        xp = device_manager.get_xp()
+        x_shape = self.cache['x_shape']
+        max_indices = self.cache['max_indices']
+        batch_size, channels, h, w = x_shape
+        k_h, k_w = self.kernel_size
+        out_h, out_w = d_out.shape[2], d_out.shape[3]
+
+        # 1. 将上游梯度重塑为二维形式
+        d_out_flat = d_out.transpose(0, 2, 3, 1).reshape(-1)
+
+        # 2. 初始化一个全零矩阵，形状与im2col展开后的输入相同
+        d_col = xp.zeros((batch_size * out_h * out_w * channels, k_h * k_w), dtype=d_out.dtype)
+
+        # 最大池化：梯度只传递给前向传播中最大值所在的位置
+        d_col[xp.arange(len(max_indices)), max_indices] = d_out_flat
+        # 4. 重塑梯度以匹配im2col的输出格式
+        d_col = d_col.reshape(self.cache['col_shape'])
+        # 5. 使用col2im将梯度还原为原始输入形状
+        d_x = col2im(d_col, x_shape, k_h, k_w, self.stride, self.padding)
+
+        return d_x
+
+    def get_config(self):
+        """返回层配置信息"""
+        return {
+            'type': 'MaxPool2D',
+            'kernel_size': self.kernel_size,
+            'stride': self.stride,
+            'padding': self.padding,
+            'params_count': 0  # 池化层无参数
+        }
+
+
+class AvgPool2D(Layer):
+    """
+    平均池化层 - 使用im2col/col2im优化
+    前向传播：计算每个池化窗口内的平均值
+    反向传播：梯度平均分配到窗口中的每个位置
+    """
+
+    def __init__(self, kernel_size, stride=None, padding=0):
+        """
+        参数:
+        - kernel_size: 池化窗口大小，整数或元组 (k_h, k_w)
+        - stride: 步长，默认为kernel_size
+        - padding: 填充大小
+        """
+        if stride is None:
+            self.stride = kernel_size
+        else:
+            self.stride = stride
+        if isinstance(kernel_size, int):
+            kernel_size = (kernel_size, kernel_size)
+        self.kernel_size = kernel_size
+        self.padding = padding
+        self.cache = {}  # 用于缓存中间结果，如最大值位置
+
+    def forward(self, x):
+        """
+        前向传播 - 平均池化
         """
         xp = device_manager.get_xp()
         batch_size, channels, h, w = x.shape
@@ -355,13 +450,9 @@ class Pool2DLayer(Layer):
         col_reshaped = col.reshape(-1, k_h * k_w)
 
         # 4. 根据池化模式进行计算
-        if self.mode == 'max':
-            # 记录最大值位置，用于反向传播
-            max_indices = xp.argmax(col_reshaped, axis=1)
-            output = col_reshaped[xp.arange(len(max_indices)), max_indices]
-        else:  # 'avg'
-            output = xp.mean(col_reshaped, axis=1)
-            max_indices = None  # 平均池化无需记录位置
+
+        output = xp.mean(col_reshaped, axis=1)
+
 
         # 5. 将输出重塑为4D张量 (batch_size, channels, out_h, out_w)
         output = output.reshape(batch_size, out_h, out_w, channels).transpose(0, 3, 1, 2)
@@ -370,19 +461,18 @@ class Pool2DLayer(Layer):
         self.cache = {
             'x_shape': x.shape,
             'col_shape': col.shape,
-            'max_indices': max_indices,
-            'input_col': col_reshaped if self.mode == 'avg' else None  # 平均池化需要原始数据
+            'input_col': col_reshaped   # 平均池化需要原始数据
         }
 
         return output
 
-    def backward(self, d_out, learning_rate=0.01):
+    def backward(self, d_out, learning_rate=None, loss_name=None):
         """
-        反向传播（使用im2col优化）
+        反向传播 - 平均池化
+        将梯度平均分配到池化窗口中的每个位置
         """
         xp = device_manager.get_xp()
         x_shape = self.cache['x_shape']
-        max_indices = self.cache['max_indices']
         batch_size, channels, h, w = x_shape
         k_h, k_w = self.kernel_size
         out_h, out_w = d_out.shape[2], d_out.shape[3]
@@ -394,13 +484,8 @@ class Pool2DLayer(Layer):
         d_col = xp.zeros((batch_size * out_h * out_w * channels, k_h * k_w), dtype=d_out.dtype)
 
         # 3. 根据池化模式分配梯度
-        if self.mode == 'max':
-            # 最大池化：梯度只传递给前向传播中最大值所在的位置
-            d_col[xp.arange(len(max_indices)), max_indices] = d_out_flat
-        else:
-            # 平均池化：梯度平均分配到窗口中的每个位置
-            avg_grad = d_out_flat.reshape(-1, 1) / (k_h * k_w)
-            d_col[:] = avg_grad  # 将平均梯度分配到整个窗口
+        avg_grad = d_out_flat.reshape(-1, 1) / (k_h * k_w)
+        d_col[:] = avg_grad  # 将平均梯度分配到整个窗口
 
         # 4. 重塑梯度以匹配im2col的输出格式
         d_col = d_col.reshape(self.cache['col_shape'])
@@ -409,6 +494,16 @@ class Pool2DLayer(Layer):
         d_x = col2im(d_col, x_shape, k_h, k_w, self.stride, self.padding)
 
         return d_x
+
+    def get_config(self):
+        """返回层配置信息"""
+        return {
+            'type': 'AvgPool2D',
+            'kernel_size': self.kernel_size,
+            'stride': self.stride,
+            'padding': self.padding,
+            'params_count': 0  # 池化层无参数
+        }
 
 
 class Flatten(Layer):

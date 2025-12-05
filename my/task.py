@@ -1,7 +1,7 @@
 from sklearn.datasets import make_classification
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from my.layers import FullyConnectedLayer, Conv2DLayer, Pool2DLayer,Flatten,Dropout,BatchNormalization
+from my.layers import FullyConnectedLayer, Conv2DLayer, MaxPool2D,AvgPool2D,Flatten,Dropout,BatchNormalization
 from my.models import NeuralNetwork
 from my.device_manager import device_manager
 from sklearn.metrics import accuracy_score, classification_report, f1_score
@@ -103,12 +103,12 @@ def conv_task(epochs, lr, batch_size, net_seed=40):
         Conv2DLayer(in_channels=1, out_channels=6, kernel_size=5, stride=1, padding=0),
         BatchNormalization(num_features=6),
         ReLU(),
-        Pool2DLayer(kernel_size=2, stride=2, mode='max'),
+        MaxPool2D(kernel_size=4, stride=2),
         Conv2DLayer(in_channels=6, out_channels=16, kernel_size=5, stride=1, padding=0),
         BatchNormalization(num_features=16),
         ReLU(),
-        Pool2DLayer(kernel_size=2, stride=2, mode='max'),
-        Conv2DLayer(in_channels=16, out_channels=64, kernel_size=4, stride=1, padding=0),
+        MaxPool2D(kernel_size=3, stride=2),
+        Conv2DLayer(in_channels=16, out_channels=64, kernel_size=3, stride=1, padding=0),
         ReLU(),
         Flatten(),
         Dropout(),
@@ -126,9 +126,9 @@ def conv_task(epochs, lr, batch_size, net_seed=40):
     x_train = x_train.reshape(-1, 1, 28, 28)  # 从(55000, 28, 28)变为(55000, 1, 28, 28)
     x_test = x_test.reshape(-1, 1, 28, 28)  # 同样处理测试集
     print("数据集初始化完成")
-    net.set_save_dir("./result/卷积任务/有批量归一化")
-    net.train(x_train, y_train, epochs, lr, batch_size=batch_size, loss_name='cross_entropy', save_mode=1, save_interval=10)
-    # net.load_weights('epoch_0500_loss_0.071979.npz')
+    net.set_save_dir("./result/卷积任务/重叠池化")
+    net.train(x_train, y_train, epochs, lr, batch_size=batch_size, loss_name='cross_entropy', save_mode=1, save_interval=10,checkpoint_path="epoch_0080_loss_0.097536.npz")
+    # net.load_weights('epoch_0050_loss_0.131943.npz')
     y_pred_prob = net.predict(x_test)
     y_pred = xp.argmax(y_pred_prob, axis=1)
     if hasattr(y_pred, 'get'):  # 检查是否为CuPy数组
